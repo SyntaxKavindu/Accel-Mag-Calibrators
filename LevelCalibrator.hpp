@@ -13,11 +13,11 @@
 
 // Board-mounting rotation.
 //
-// AccelerometerCalibrator removes bias, per-axis scale and -- in tumble mode
-// -- cross-axis sensitivity. What neither of its modes can remove is the
-// airframe sitting rotated relative to the sensor: both fits only ever observe
-// the MAGNITUDE of gravity, and rotating a sphere leaves the same sphere, so
-// the data carries no information about that rotation at all. Measured, a
+// AccelerometerCalibrator removes bias and per-axis scale. What it cannot
+// remove is the airframe sitting rotated relative to the sensor: its fit only
+// ever observes the MAGNITUDE of gravity, and rotating a sphere leaves the same
+// sphere, so the data carries no information about that rotation at all. No
+// fit of that shape can, whatever its form. Measured, a
 // 1.16 deg mounting rotation comes out of both procedures at 1.16 deg.
 //
 // Recovering it needs an outside reference, which is what this provides: rest

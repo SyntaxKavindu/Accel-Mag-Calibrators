@@ -22,6 +22,7 @@ void CompassCalibrator::reset() {
     _filled_bins = 0;
     memset(_bin_count, 0, sizeof(_bin_count));
     _scatter_ratio = 0.0f;
+    _last_residual = -1.0f;
     _nominal_radius = 500.0f;
     _status = CalStatus::IDLE;
     _offset = Vector3f();
@@ -592,7 +593,10 @@ CalStatus CompassCalibrator::calibrate() {
     // Last gate, and the only one that looks at how well the answer fits the
     // data rather than at the shape of the algebra. Everything above can pass
     // on readings that carry no field information at all.
-    if (fitResidual(offset, softiron) > COMPASS_CAL_MAX_FIT_RESIDUAL) {
+    // Recorded whether it passes or fails: on a failure it is the only number
+    // that says how badly, and on a success it is a quality score worth seeing.
+    _last_residual = fitResidual(offset, softiron);
+    if (_last_residual > COMPASS_CAL_MAX_FIT_RESIDUAL) {
         _status = CalStatus::FAILED_POOR_FIT;
         return _status;
     }

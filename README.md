@@ -15,7 +15,7 @@ code builds unchanged on another MCU or in a host-side test harness.
 
 | File | What it is |
 |---|---|
-| `AccelerometerCalibrator.hpp/.cpp` | Accelerometer calibration in two modes: **six-position** (bias + per-axis scale) and **tumble** (full ellipsoid fit, adds cross-axis sensitivity) |
+| `AccelerometerCalibrator.hpp/.cpp` | Accelerometer calibration: **six-position**, fitting bias and per-axis scale |
 | `CompassCalibrator.hpp/.cpp` | Magnetometer calibration: hard-iron offset + soft-iron matrix from an ellipsoid fit over a free-hand sweep |
 | `LevelCalibrator.hpp/.cpp` | Board-mounting rotation (roll/pitch) against a known-level surface, plus an optional supplied yaw offset |
 | `MathTypes.hpp` | Aggregator header — the maths types and nothing else |
@@ -37,7 +37,7 @@ These are the rules the code is written to, and they explain most of its API:
 - **No HAL.** Including a shared `common.hpp` for `Vector3f` alone used to pull
   `stm32f7xx_hal.h` in behind it, which made every one of these classes
   unbuildable elsewhere. `MathTypes.hpp` exists to break that.
-- **Caller-owned sample buffers.** The tumble and compass procedures need
+- **Caller-owned sample buffers.** The compass procedure needs
   ~3.6 kB of sample storage. That is passed in rather than held as a member
   array so the integrator decides where it lives — a scratch/CCM region, a
   stack buffer in the calibration routine, or memory shared between the two
@@ -57,36 +57,42 @@ An accelerometer reading is `raw = A·g + bias`, and the gain matrix splits as
 `A = R·S`. Which part of that a procedure recovers is the single most important
 thing to understand before choosing one:
 
-| Error | Six-position | Tumble | Level |
-|---|---|---|---|
-| Bias (offset) | ✅ | ✅ | — |
-| Per-axis scale | ✅ | ✅ | — |
-| `S` — cross-axis sensitivity (the chip's own axes not quite perpendicular) | ❌ | ✅ | — |
-| `R` — board mounted rotated in the airframe (roll/pitch) | ❌ | ❌ | ✅ |
-| Mounting yaw | ❌ | ❌ | ⚠️ only if supplied |
+| Error | Six-position | Level |
+|---|---|---|
+| Bias (offset) | ✅ | — |
+| Per-axis scale | ✅ | — |
+| `S` — cross-axis sensitivity (the chip's own axes not quite perpendicular) | ❌ | — |
+| `R` — board mounted rotated in the airframe (roll/pitch) | ❌ | ✅ |
+| Mounting yaw | ❌ | ⚠️ only if supplied |
 
-The reason neither accelerometer mode can recover `R` is inherent, not an
-implementation gap: both fits only ever observe the **magnitude** of gravity,
-and rotating a sphere leaves the same sphere, so the data carries no
-information about `R` at all. Measured, a 1.16° mounting rotation comes out of
-both procedures at 1.16°. Recovering it needs an outside reference, which is
-what `LevelCalibrator` provides.
+The reason the accelerometer fit cannot recover `R` is inherent, not an
+implementation gap: it only ever observes the **magnitude** of gravity, and
+rotating a sphere leaves the same sphere, so the data carries no information
+about `R` at all. No fit of that shape can, whatever its form. Measured, a 1.16°
+mounting rotation comes out at 1.16°. Recovering it needs an outside reference,
+which is what `LevelCalibrator` provides.
 
-Figures measured on the parent project, for calibration left in place:
+That split is deliberate and worth preserving: **the accelerometer correction is
+diagonal, so it contains no rotation** and cannot fight the one `LevelCalibrator`
+stores. Two rotations measured against different references would each be
+correcting the other's reference.
 
-- Six-position leaves misalignment essentially 1:1 (0.009° with none present,
-  1.15° with 1.15° of it). `getMaxMisalignmentDeg()` reports what is being left
-  behind.
-- Tumble removes the `S` half: 1.15° → 0.04°. With both `R` and `S` present it
-  goes 2.03° → 1.23°, the residue being `R`.
+`S` is left uncorrected. Separating it needs an ellipsoid fit over a free-hand
+tumble — a 3.6 kB buffer, a minute of the operator's time, and a procedure whose
+result depends on how well the airframe was rotated. On a modern MEMS part the
+term is small enough that this was judged not to pay for itself; a sphere plot
+of corrected samples is the cheap way to confirm that on your own hardware.
+
+- Six-position leaves cross-axis misalignment essentially 1:1 (0.009° with none
+  present, 1.15° with 1.15° of it).
 - Level, run afterwards, removes the roll/pitch part of `R`. A mounting yaw left
   at 0 leaks back into roll/pitch as the airframe tilts (1° of mounting yaw
   leaves 0.50° yaw and 0.39° roll/pitch error across a ±34° envelope, against
   1.10° uncorrected).
 
-**Recommended order:** accelerometer (tumble preferred) → level → compass.
-Level consumes accelerometer-corrected samples, and its rotation applies to
-every sensor on the board.
+**Recommended order:** accelerometer → level → compass. Level consumes
+accelerometer-corrected samples, and its rotation applies to every sensor on the
+board.
 
 ---
 
@@ -110,42 +116,16 @@ for (int p = 0; p < (int)AccelPosition::NUM_POSITIONS; p++) {
 }
 
 if (accel.calibrate() == AccelCalStatus::SUCCESS) {
-    Vector3f bias  = accel.getBias();
-    Vector3f scale = accel.getScale();
-    float left_over = accel.getMaxMisalignmentDeg();   // degrees, or -1
+    Vector3f bias   = accel.getBias();
+    Vector3f scale  = accel.getScale();
+    Matrix3f matrix = accel.getMatrix();   // diag(1/scale), for one stored form
+    Vector3f corrected = accel.correct(raw);            // magnitude ~1.0
 }
 ```
 
 Each position needs `ACCEL_CAL_SAMPLES_PER_POSITION` (100) **consecutive**
 samples inside the motion threshold; a single excursion discards that
 position's average and restarts it.
-
-### Accelerometer — tumble
-
-```cpp
-Vector3f buffer[ACCEL_CAL_TUMBLE_MAX_SAMPLES];        // 300 → 3.6 kB, caller-owned
-AccelerometerCalibrator accel;
-
-if (!accel.beginTumble(9.80665f,                      // 1 g in sample units
-                       0.2f,                          // stillness threshold
-                       buffer, ACCEL_CAL_TUMBLE_MAX_SAMPLES)) {
-    // null buffer, or capacity < ACCEL_CAL_TUMBLE_MIN_SAMPLES — never started
-}
-
-while (!accel.isReadyToCalibrate()) {
-    accel.addSample(imu.ax, imu.ay, imu.az);
-    // report accel.getProgressPercent(); watch accel.isStalled()
-}
-
-if (accel.calibrate() == AccelCalStatus::SUCCESS) {
-    Vector3f corrected = accel.correct(raw);          // in g, magnitude ~1.0
-}
-```
-
-The operator rotates the airframe through many orientations, **pausing** in
-each: a sample is only taken once a whole `ACCEL_CAL_STILLNESS_WINDOW` (12) of
-readings is still, and only if it lands in a spherical bin that is not already
-full. Long gaps with no accepted samples are normal.
 
 ### Compass
 
@@ -212,16 +192,16 @@ this catches people out:
 
 | Call | Output |
 |---|---|
-| `AccelerometerCalibrator::correct()` | **Normalised to g** — magnitude ≈ 1.0, in both modes |
+| `AccelerometerCalibrator::correct()` | **Normalised to g** — magnitude ≈ 1.0 |
 | `CompassCalibrator::correct()` | **Sensor field units** — magnitude ≈ the nominal magnitude passed to `begin()` |
 | `LevelCalibrator::correct()` | Unchanged units — a pure rotation |
 
 So `9.80665` (m/s²) and `2048` (raw LSB at ±16 g) are both valid `nominal_g`
 values, as are `0.48` (Gauss) and `500` (raw LSB) for the field magnitude —
 but the accelerometer hands you g either way, while the compass hands back
-whatever scale you gave it. `getNominalRadius()` on either class returns the
-magnitude the fit was normalised against, which is what you need to fold the
-tumble matrix and the compass matrix into a single stored correction matrix.
+whatever scale you gave it. `CompassCalibrator::getNominalRadius()` returns the
+magnitude its fit was normalised against, which is what you need to fold its
+matrix into a single stored correction matrix.
 
 `correct()` is a **pass-through until the fit has succeeded** on all three
 classes — it returns its input unchanged rather than applying half-finished
@@ -231,7 +211,7 @@ gains.
 
 ## Coverage gates — why a fit gets rejected
 
-Both ellipsoid fits solve `x'Mx + 2n'x = 1` in the least-squares sense over a
+The compass fit solves `x'Mx + 2n'x = 1` in the least-squares sense over a
 9×9 normal-equation system, **pre-centred on the sample cloud's centroid**
 (that form cannot represent an ellipsoid passing through the origin and is
 ill-conditioned near it; pre-centring keeps the fit in the well-behaved regime
@@ -242,16 +222,21 @@ ellipsoid onto a sphere without also rotating the sensor frame.
 A solution that satisfies every algebraic check can still be nonsense, so the
 result passes through layered gates:
 
-| Gate | Compass | Accel tumble | Failure status |
-|---|---|---|---|
-| Minimum samples | 150 | 150 | `FAILED_NOT_ENOUGH_SAMPLES` |
-| Filled spherical bins (of 64, ≤5 per bin) | ≥45 | ≥45 | `FAILED_POOR_COVERAGE` |
-| Scatter anisotropy | ≥0.5 | — | `FAILED_POOR_COVERAGE` |
-| 9×9 solve / 3×3 inverse | ✅ | ✅ | `FAILED_SINGULAR_MATRIX` |
-| Positive-definite, non-flat ellipsoid | ✅ | ✅ | `FAILED_DEGENERATE_ELLIPSOID` |
-| RMS fit residual | ≤15 % | ≤15 % | `FAILED_POOR_FIT` |
+| Gate | Compass | Failure status |
+|---|---|---|
+| Minimum samples | 150 | `FAILED_NOT_ENOUGH_SAMPLES` |
+| Filled spherical bins (of 64, ≤5 per bin) | ≥45 | `FAILED_POOR_COVERAGE` |
+| Scatter anisotropy | ≥0.5 | `FAILED_POOR_COVERAGE` |
+| 9×9 solve / 3×3 inverse | ✅ | `FAILED_SINGULAR_MATRIX` |
+| Positive-definite, non-flat ellipsoid | ✅ | `FAILED_DEGENERATE_ELLIPSOID` |
+| RMS fit residual | ≤15 % | `FAILED_POOR_FIT` |
 
-Two of those deserve explanation.
+`getLastFitResidual()` and `getScatterRatio()` report the last two as numbers
+rather than just a pass/fail. That matters on a rejection: a residual of 0.16 is
+a sweep that nearly worked and 0.90 is a sensor or an environment carrying no
+usable field, and the difference decides what the operator should do next.
+
+Two of those gates deserve explanation.
 
 **Compass binning is done from the centre of the cloud, not the origin.** Hard
 iron routinely exceeds Earth's field, and binning about the origin then
@@ -301,7 +286,7 @@ large rotation is the one outcome that would be hard to notice afterwards.
 `getProgressPercent()` returns the **worst** of the requirements, not their
 average — all of them must be met, so the smallest is the honest answer to "how
 far along is this?". For the compass that is samples, bins and scatter; for
-tumble, samples and bins.
+six-position it is simply how many of the 600 required samples are in.
 
 None of these procedures has a timeout. If the operator stops making progress —
 vibration defeating the motion gate, an airframe never turned over — collection
@@ -315,24 +300,27 @@ caller decides whether to abort and what to tell the operator.
 | Procedure | Stall limit (samples) | ≈ time at 200 Hz | Longest gap measured in a successful run |
 |---|---|---|---|
 | Six-position | 10 000 | 50 s | — (a healthy run never gaps) |
-| Tumble | 40 000 | 200 s | 10 151 |
 | Compass | 6 000 | 30 s | 1 154 |
 | Level | 10 000 | 50 s | — |
 
-Tumble's limit is so much larger because its gate is stricter: a sample is
-accepted only once a whole window is still **and** it lands in an unfilled bin,
-so long gaps are normal. Six-position's allowance is really for an operator
-still settling the airframe after sending READY.
+These are **sample counts**, and nothing in these classes measures time — so
+what they mean in seconds is set entirely by how fast you feed them. The column
+above assumes 200 Hz. Drive them from a 1 kHz control loop and every figure is
+five times shorter: six-position's allowance becomes 10 seconds, which an
+operator settling an airframe can exceed. Decimate the feed or rescale the
+limits; the same applies to `LEVEL_CAL_SAMPLES` and
+`ACCEL_CAL_SAMPLES_PER_POSITION`, which set averaging times the same way.
+
+Six-position's allowance is really for an operator still settling the airframe
+after sending READY; a healthy run never gaps at all, because progress climbs
+with every accepted sample.
 
 Vibration tolerances, measured:
 
 - Six-position (0.5 default motion threshold): completes reliably up to
-  0.12 m/s² RMS per axis, 1 run in 20 at 0.20, never at 0.30.
-- Tumble (0.2 default stillness threshold): the threshold is compared against
-  the deviation of the whole 3-vector, so per-axis tolerance is
-  `threshold/√3` ≈ 0.115 m/s². Completes reliably up to 0.12, never at 0.15 or
-  above. A part at rest is far below this (ICM42688P is ~0.006 m/s²); a bench
-  that shakes or props turning are not.
+  0.12 m/s² RMS per axis, 1 run in 20 at 0.20, never at 0.30. A part at rest is
+  far below this (ICM42688P is ~0.006 m/s²); a bench that shakes or props
+  turning are not.
 
 ---
 
@@ -345,15 +333,10 @@ each value recorded beside it.
 
 | Constant | Default | Meaning |
 |---|---|---|
-| `ACCEL_CAL_SAMPLES_PER_POSITION` | 100 | Consecutive still samples per six-position face |
-| `ACCEL_CAL_TUMBLE_MAX_SAMPLES` | 300 | Recommended buffer capacity |
-| `ACCEL_CAL_TUMBLE_MIN_SAMPLES` | 150 | Minimum capacity, and minimum to fit |
-| `ACCEL_CAL_STILLNESS_WINDOW` | 12 | Readings that must all be still |
-| `ACCEL_CAL_TUMBLE_NUM_BINS` / `MIN_BINS` / `MAX_PER_BIN` | 64 / 45 / 5 | Spherical coverage |
-| `ACCEL_CAL_MAX_FIT_RESIDUAL` | 0.15 | Max RMS deviation from 1 g, as a fraction |
-| `ACCEL_CAL_SIXPOS_STALL_LIMIT` / `TUMBLE_STALL_LIMIT` | 10 000 / 40 000 | Stall detection |
-| `ACCEL_CAL_MIN_RADIUS` | 1e-6 | Divide-by-zero guard on nominal g |
-| `ACCEL_CAL_STANDARD_GRAVITY` | 9.80665 | Default nominal g |
+| `ACCEL_CAL_SAMPLES_PER_POSITION` | 100 | Consecutive still samples per face |
+| `ACCEL_CAL_SIXPOS_STALL_LIMIT` | 10 000 | Stall detection |
+| `ACCEL_CAL_MIN_RADIUS` | 1e-6 | Divide-by-zero guard on per-axis sensitivity |
+| `ACCEL_CAL_STANDARD_GRAVITY` | 9.80665 | Standard gravity, for callers working in m/s² |
 
 **`CompassCalibrator.hpp`**
 
@@ -382,14 +365,11 @@ each value recorded beside it.
 ## Status and result codes
 
 ```
-AccelCalStatus   IDLE, IN_PROGRESS, SUCCESS,
-                 FAILED_NOT_ENOUGH_SAMPLES, FAILED_POOR_COVERAGE,
-                 FAILED_BAD_GEOMETRY, FAILED_SINGULAR_MATRIX,
-                 FAILED_DEGENERATE_ELLIPSOID, FAILED_POOR_FIT
+AccelCalStatus   IDLE = 0, IN_PROGRESS = 1, SUCCESS = 2,
+                 FAILED_NOT_ENOUGH_SAMPLES = 3, FAILED_BAD_GEOMETRY = 4
 
 AccelSampleResult ACCEPTED, ACCEPTED_POSITION_DONE, REJECTED_MOTION,
-                 REJECTED_TOO_CLOSE, REJECTED_POSITION_DONE,
-                 REJECTED_BUFFER_FULL, REJECTED_NOT_STARTED
+                 REJECTED_POSITION_DONE, REJECTED_NOT_STARTED
 
 CalStatus        IDLE, COLLECTING, READY_TO_FIT, SUCCESS,
                  FAILED_NOT_ENOUGH_SAMPLES, FAILED_POOR_COVERAGE,
@@ -406,7 +386,12 @@ LevelSampleResult ACCEPTED, ACCEPTED_DONE, REJECTED_MOTION,
                  REJECTED_DONE, REJECTED_NOT_STARTED
 ```
 
-`REJECTED_TOO_CLOSE` means the sample landed in a bin that is already full —
+`AccelCalStatus` is numbered explicitly because these values are often reported
+over a link. They were renumbered when the tumble mode was removed: the four
+codes only an ellipsoid fit could produce went with it, and the two that remain
+moved down.
+
+`REJECTED_TOO_CLOSE` (compass) means the sample landed in a bin that is already full —
 it is the normal signal that this orientation has enough coverage, not an
 error. Compass `addSample()` deliberately checks the buffer **before** the
 mode, so a caller can always tell "buffer full" from "never started".
@@ -419,16 +404,15 @@ Objects hold no sample storage of their own; the buffer is yours to place.
 
 | Object | `sizeof` |
 |---|---|
-| `AccelerometerCalibrator` | ~512 B |
-| `CompassCalibrator` | ~176 B |
-| `LevelCalibrator` | ~100 B |
+| `AccelerometerCalibrator` | 512 B |
+| `CompassCalibrator` | 184 B |
+| `LevelCalibrator` | 100 B |
 | 300-sample buffer (`Vector3f[300]`) | 3 600 B |
 
 Measured with `sizeof` on a 64-bit host; a 32-bit target is a few bytes smaller
-(the sample-buffer pointer). Six-position mode needs **no buffer at all** — it
+(the sample-buffer pointer). **The accelerometer needs no buffer at all** — it
 keeps six running averages, which is why it costs nothing beyond the object.
-Tumble and compass are mutually exclusive, so a single 3.6 kB buffer serves
-both.
+The compass is the only procedure that wants the 3.6 kB.
 
 ---
 
@@ -458,12 +442,11 @@ persist the resulting bias/scale/matrix yourself.
 **Results are not bit-reproducible across toolchains.** Binning goes through
 `atan2f`, so a 1 ULP difference at a bin boundary puts a sample in a different
 bin; coverage is then reached after a different number of samples with a
-slightly different set, and the fits differ accordingly. Measured between two
-libm implementations, the same airframe reached tumble coverage at 24 033
-samples on one and 26 647 on the other — both correct, neither identical.
-Accuracy is unaffected (medians moved by under a tenth of a degree across 40
-airframes), but **do not diff results against a reference capture taken on a
-different libm**. A compass sweep sitting exactly on the coverage minimum can
+slightly different set, and the fits differ accordingly. Accuracy is unaffected
+(medians moved by under a tenth of a degree across 40 airframes), but **do not
+diff results against a reference capture taken on a different libm**. This
+applies to the compass only — six-position and level do no binning and are
+bit-reproducible. A compass sweep sitting exactly on the coverage minimum can
 likewise go either way, complete or stalled, depending on the libm; 2 of 20
 borderline seeds were decided differently between implementations. A sweep with
 real margin is unaffected.
@@ -473,7 +456,8 @@ on a single-precision FPU. The eigen-decomposition is a cyclic Jacobi on a 3×3
 symmetric matrix; the linear solve is Gaussian elimination with partial pivoting
 on the 9×9 normal equations.
 
-**Cost.** The per-sample path is O(1) apart from a compass rebin (one pass over
+**Cost.** The accelerometer and level paths are O(1) per sample and involve no
+matrix work at all. The compass per-sample path is O(1) apart from a rebin (one pass over
 the stored samples) and the cached scatter ratio (one pass plus a 3×3
 eigen-decomposition, once per accepted sample — accepted samples are capped by
 the buffer, so this is bounded). The fit itself is a single 9×9 solve, paid once
@@ -487,14 +471,19 @@ at the end of a procedure that has already run for seconds.
    what the accelerometer reads. `LevelCalibrator` accepts a `yaw_offset_deg`
    you supply from outside — the nominal angle the board is bolted at, or a
    value trimmed until heading reads true — but it cannot derive one.
-2. **Six-position leaves all cross-axis terms untouched.** Its correction is
-   `diag(1/scale)`, so every off-diagonal term passes through.
-   `getMaxMisalignmentDeg()` tells you how much.
+2. **The accelerometer fit leaves all cross-axis terms untouched.** Its
+   correction is `diag(1/scale)`, so every off-diagonal term passes through.
+   That is what keeps it rotation-free and therefore compatible with
+   `LevelCalibrator`; separating the genuine cross-axis part needs an ellipsoid
+   fit, which this library no longer carries. Plot corrected samples as a sphere
+   to see whether it matters on your hardware.
 3. **No timeouts.** Every procedure will collect for ever if the operator never
    satisfies its gates. `isStalled()` is the mechanism for noticing; acting on
    it is the caller's job.
-4. **`getScale()` is six-position only; `getMatrix()` is tumble only.** Each
-   returns its mode's result; check `getMode()` before reading either.
+4. **`getMatrix()` is identity until the fit succeeds**, as `correct()` is a
+   pass-through until then. It returns `diag(1/scale)` — the same correction
+   `correct()` applies, in matrix form for callers that store one affine
+   correction per sensor.
 5. **Compass coverage under a one-sided sweep** is caught by the scatter test at
    fit and readiness time, not by the bin count. Lowering
    `COMPASS_CAL_MIN_SCATTER_RATIO` toward 0.25 lets never-inverted sweeps
