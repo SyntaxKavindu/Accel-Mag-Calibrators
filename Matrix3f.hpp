@@ -14,9 +14,11 @@ struct Matrix3f {
     float m[3][3];
 
     static Matrix3f identity() {
+        // Matrix3f has no user-provided constructor, so `Matrix3f r{}` is a
+        // value-initialisation that already zeroes every element; only the
+        // diagonal is left to write.
         Matrix3f r{};
         r.m[0][0] = r.m[1][1] = r.m[2][2] = 1.0f;
-        r.m[0][1] = r.m[0][2] = r.m[1][0] = r.m[1][2] = r.m[2][0] = r.m[2][1] = 0.0f;
         return r;
     }
 
@@ -26,14 +28,6 @@ struct Matrix3f {
             m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
             m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z);
     }
-
-    // Standard maths notation for the two products above, so `R * v` and
-    // `A * B` both work. Pure aliases -- identical code, no conversion, nothing
-    // to choose between them on cost. They exist because writing `R * v` is the
-    // natural thing to reach for, and without them that is a compile error
-    // ("no match for operator*") rather than a hint to call .mul().
-    Vector3f operator*(const Vector3f &v) const { return mul(v); }
-    Matrix3f operator*(const Matrix3f &o) const { return mul(o); }
 
     // this * other
     Matrix3f mul(const Matrix3f &o) const {

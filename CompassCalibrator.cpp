@@ -117,10 +117,8 @@ float CompassCalibrator::scatterAnisotropy() const {
 
     const Vector3f c = centroid();
 
+    // Value-initialised, so every element starts at zero.
     Matrix3f M = Matrix3f();
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) M.m[i][j] = 0.0f;
-    }
     for (uint16_t k = 0; k < _sample_count; k++) {
         const Vector3f d = _samples[k] - c;
         const float v[3] = { d.x, d.y, d.z };
@@ -134,8 +132,9 @@ float CompassCalibrator::scatterAnisotropy() const {
     }
 
     float eig[3];
-    Matrix3f vec;
-    eigenSymmetric3x3(M, eig, vec);
+    // Only the eigenvalues are wanted; passing null skips accumulating the
+    // eigenvectors, which this never reads.
+    eigenSymmetric3x3(M, eig, nullptr);
 
     float mn = eig[0], mx = eig[0];
     for (int i = 1; i < 3; i++) {
@@ -387,7 +386,7 @@ bool CompassCalibrator::invert3x3(const Matrix3f &in, Matrix3f &out) {
     return true;
 }
 
-static inline void jacobiRotate(Matrix3f &m, Matrix3f &v, int p, int q) {
+static inline void jacobiRotate(Matrix3f &m, Matrix3f *v, int p, int q) {
     if (fabsf(m.m[p][q]) < 1e-12f) return;
 
     float theta = (m.m[q][q] - m.m[p][p]) / (2.0f * m.m[p][q]);
@@ -410,15 +409,16 @@ static inline void jacobiRotate(Matrix3f &m, Matrix3f &v, int p, int q) {
         }
     }
 
+    if (v == nullptr) return;
     for (int k = 0; k < 3; k++) {
-        float vkp = v.m[k][p], vkq = v.m[k][q];
-        v.m[k][p] = c * vkp - s * vkq;
-        v.m[k][q] = s * vkp + c * vkq;
+        float vkp = v->m[k][p], vkq = v->m[k][q];
+        v->m[k][p] = c * vkp - s * vkq;
+        v->m[k][q] = s * vkp + c * vkq;
     }
 }
 
-void CompassCalibrator::eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f &eigvec) {
-    eigvec = Matrix3f::identity();
+void CompassCalibrator::eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f *eigvec) {
+    if (eigvec != nullptr) *eigvec = Matrix3f::identity();
 
     // Convergence measured against the size of the matrix. An absolute
     // threshold would either never be met or be met immediately, depending
@@ -549,7 +549,7 @@ CalStatus CompassCalibrator::calibrate() {
 
     float eigval[3];
     Matrix3f eigvec;
-    eigenSymmetric3x3(MK, eigval, eigvec);
+    eigenSymmetric3x3(MK, eigval, &eigvec);
 
     // Reject anything that is not a genuine ellipsoid: a non-positive
     // eigenvalue means a hyperboloid or a paraboloid, and an eigenvalue
@@ -571,15 +571,11 @@ CalStatus CompassCalibrator::calibrate() {
         }
     }
 
-    // Every element written explicitly. Only the diagonal carries a value, and
-    // the square root below is wrong unless the rest are zero, so this must
-    // not depend on how common.hpp happens to default-construct a Matrix3f --
-    // `Matrix3f D{}` zeroes an aggregate but calls a user-provided default
-    // constructor, which may leave the members uninitialised.
+    // The square root below is wrong unless the off-diagonal elements are
+    // zero. Matrix3f (see Matrix3f.hpp) has no user-provided constructor, so
+    // `Matrix3f()` is a value-initialisation that zeroes all nine; only the
+    // diagonal is written here.
     Matrix3f D = Matrix3f();
-    D.m[0][0] = 0.0f; D.m[0][1] = 0.0f; D.m[0][2] = 0.0f;
-    D.m[1][0] = 0.0f; D.m[1][1] = 0.0f; D.m[1][2] = 0.0f;
-    D.m[2][0] = 0.0f; D.m[2][1] = 0.0f; D.m[2][2] = 0.0f;
     D.m[0][0] = sqrtf(eigval[0]);
     D.m[1][1] = sqrtf(eigval[1]);
     D.m[2][2] = sqrtf(eigval[2]);

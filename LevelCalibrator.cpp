@@ -149,7 +149,7 @@ bool LevelCalibrator::rotationBetween(const Vector3f &from, const Vector3f &to,
 Matrix3f LevelCalibrator::yawRotation(float radians) {
     const float c = cosf(radians);
     const float s = sinf(radians);
-    Matrix3f r = Matrix3f::identity();
+    Matrix3f r;
     r.m[0][0] = c;    r.m[0][1] = -s;   r.m[0][2] = 0.0f;
     r.m[1][0] = s;    r.m[1][1] = c;    r.m[1][2] = 0.0f;
     r.m[2][0] = 0.0f; r.m[2][1] = 0.0f; r.m[2][2] = 1.0f;

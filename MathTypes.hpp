@@ -4,11 +4,10 @@
  *  Created on: Sep 6, 2026
  *      Author: KAVINDU
  *
- * The vector/quaternion/matrix types and the freestanding C++ library pieces
- * that go with them -- and NOTHING ELSE. No HAL, no board headers, no
- * peripherals.
+ * The vector/matrix types and the freestanding C++ library pieces that go with
+ * them -- and NOTHING ELSE. No HAL, no board headers, no peripherals.
  *
- * This exists so the parts of this tree that are pure algorithm -- ESEKF,
+ * This exists so the parts of this tree that are pure algorithm --
  * AccelerometerCalibrator, CompassCalibrator, LevelCalibrator -- can be lifted
  * into another project, another MCU, or a host-side test harness without
  * carrying an STM32F7 dependency they never use. Including common.hpp for
@@ -31,7 +30,6 @@
 #include <cstring> // memset, memcpy
 
 #include "Vector3f.hpp"
-#include "Quaternionf.hpp"
 #include "Matrix3f.hpp"
 
 #endif /* COMMON_MATHTYPES_HPP_ */

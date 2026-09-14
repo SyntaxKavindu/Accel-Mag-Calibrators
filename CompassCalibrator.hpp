@@ -127,8 +127,6 @@ public:
     CalStatus calibrate();
 
     CalStatus getStatus() const { return _status; }
-    uint16_t getSampleCount() const { return _sample_count; }
-    uint8_t getFilledBinsCount() const { return _filled_bins; }
 
     // How well the last calibrate() reproduced its own samples: RMS deviation
     // from the nominal magnitude, as a fraction of it. -1 until one has run.
@@ -216,7 +214,9 @@ private:
 
     static bool solve9x9(float A[9][9], float b[9], float x[9]);
     static bool invert3x3(const Matrix3f &in, Matrix3f &out);
-    static void eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f &eigvec);
+    // eigvec may be null when only the eigenvalues are wanted, which skips
+    // accumulating the rotation; the eigenvalues are unaffected either way.
+    static void eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f *eigvec);
 };
 
 #endif /* CALIBRATORS_COMPASSCALIBRATOR_HPP_ */
