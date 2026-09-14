@@ -4,10 +4,11 @@
  *  Created on: Sep 6, 2026
  *      Author: KAVINDU
  *
- * The vector/matrix types and the freestanding C++ library pieces that go with
- * them -- and NOTHING ELSE. No HAL, no board headers, no peripherals.
+ * The vector/quaternion/matrix types and the freestanding C++ library pieces
+ * that go with them -- and NOTHING ELSE. No HAL, no board headers, no
+ * peripherals.
  *
- * This exists so the parts of this tree that are pure algorithm --
+ * This exists so the parts of this tree that are pure algorithm -- ESEKF,
  * AccelerometerCalibrator, CompassCalibrator, LevelCalibrator -- can be lifted
  * into another project, another MCU, or a host-side test harness without
  * carrying an STM32F7 dependency they never use. Including common.hpp for
@@ -19,6 +20,13 @@
  *
  * Requirements on the toolchain: a C++11 freestanding implementation with
  * <cmath> and <cstring>. No dynamic allocation, no exceptions, no RTTI.
+ *
+ * SHARED HEADER. This file and the three types it includes are carried
+ * verbatim by the standalone Error-State-Extended-Kalman-Filter and
+ * Accel-Mag-Calibrators repositories as well as by this project, so the
+ * consumers named above are the full set across all three and common.hpp
+ * exists only in the flight-controller tree. Keep the copies byte-identical:
+ * every one of those classes is built against all of them.
  */
 
 #ifndef COMMON_MATHTYPES_HPP_
@@ -30,6 +38,7 @@
 #include <cstring> // memset, memcpy
 
 #include "Vector3f.hpp"
+#include "Quaternionf.hpp"
 #include "Matrix3f.hpp"
 
 #endif /* COMMON_MATHTYPES_HPP_ */

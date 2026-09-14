@@ -68,6 +68,12 @@
 // and 2048 (raw LSB at ACCEL_FS_16G) are both valid.
 #define ACCEL_CAL_MIN_RADIUS           1e-6f
 
+// Standard gravity, matching ICM42688P's raw -> m/s^2 conversion.
+// Not read inside this class -- it is unit-agnostic -- but the integrating
+// project needs a name for the constant that turns a corrected reading into
+// m/s^2, and defining it beside the calibrator keeps the two from drifting.
+#define ACCEL_CAL_STANDARD_GRAVITY     9.80665f
+
 enum class AccelPosition : uint8_t {
     X_UP = 0, X_DOWN = 1, Y_UP = 2, Y_DOWN = 3, Z_UP = 4, Z_DOWN = 5,
     NUM_POSITIONS = 6
@@ -117,6 +123,9 @@ public:
     void beginSixPosition(float motion_threshold = 0.5f);
     void startPosition(AccelPosition pos);
     bool isPositionDone(AccelPosition pos) const;
+    // Which position startPosition() last selected. Used by a driving layer
+    // to name the face it is currently asking the operator to hold.
+    AccelPosition getCurrentPosition() const { return _current_pos; }
     bool allPositionsComplete() const;
 
     AccelSampleResult addSample(float x, float y, float z);

@@ -127,6 +127,11 @@ public:
     CalStatus calibrate();
 
     CalStatus getStatus() const { return _status; }
+    // Raw collection progress, for a driving layer that reports it to an
+    // operator: how many samples were kept, and how many of the
+    // COMPASS_CAL_NUM_BINS direction bins they cover.
+    uint16_t getSampleCount() const { return _sample_count; }
+    uint8_t getFilledBinsCount() const { return _filled_bins; }
 
     // How well the last calibrate() reproduced its own samples: RMS deviation
     // from the nominal magnitude, as a fraction of it. -1 until one has run.
