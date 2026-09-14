@@ -29,6 +29,14 @@ struct Matrix3f {
             m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z);
     }
 
+    // Standard maths notation for the two products above, so `R * v` and
+    // `A * B` both work. Pure aliases -- identical code, no conversion, nothing
+    // to choose between them on cost. They exist because writing `R * v` is the
+    // natural thing to reach for, and without them that is a compile error
+    // ("no match for operator*") rather than a hint to call .mul().
+    Vector3f operator*(const Vector3f &v) const { return mul(v); }
+    Matrix3f operator*(const Matrix3f &o) const { return mul(o); }
+
     // this * other
     Matrix3f mul(const Matrix3f &o) const {
         Matrix3f r{};

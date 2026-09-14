@@ -19,7 +19,7 @@ code builds unchanged on another MCU or in a host-side test harness.
 | `CompassCalibrator.hpp/.cpp` | Magnetometer calibration: hard-iron offset + soft-iron matrix from an ellipsoid fit over a free-hand sweep |
 | `LevelCalibrator.hpp/.cpp` | Board-mounting rotation (roll/pitch) against a known-level surface, plus an optional supplied yaw offset |
 | `MathTypes.hpp` | Aggregator header — the maths types and nothing else |
-| `Vector3f.hpp`, `Matrix3f.hpp` | Minimal float vector and 3×3 matrix |
+| `Vector3f.hpp`, `Matrix3f.hpp`, `Quaternionf.hpp` | Minimal float vector, 3×3 matrix and quaternion |
 
 Comments in the sources refer to `ICM42688P`, `LIS3MDL`, `Imu` and
 `Calibrator::correctBoardFrame()`. Those live in the parent flight-controller
@@ -336,6 +336,7 @@ each value recorded beside it.
 | `ACCEL_CAL_SAMPLES_PER_POSITION` | 100 | Consecutive still samples per face |
 | `ACCEL_CAL_SIXPOS_STALL_LIMIT` | 10 000 | Stall detection |
 | `ACCEL_CAL_MIN_RADIUS` | 1e-6 | Divide-by-zero guard on per-axis sensitivity |
+| `ACCEL_CAL_STANDARD_GRAVITY` | 9.80665 | Standard gravity, for callers working in m/s² |
 
 **`CompassCalibrator.hpp`**
 
@@ -426,7 +427,7 @@ g++ -std=c++11 -Wall -Wextra -c *.cpp        # compiles clean, no warnings
 
 For an embedded target the same applies with your cross-compiler; nothing needs
 `-fexceptions`, RTTI or a heap. Include `MathTypes.hpp` (not a HAL-bearing
-`common.hpp`) anywhere you need `Vector3f` or `Matrix3f` without
+`common.hpp`) anywhere you need `Vector3f`, `Matrix3f` or `Quaternionf` without
 dragging in a vendor SDK.
 
 Hardware integration is your side of the line: feed `addSample()` from whatever
