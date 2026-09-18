@@ -43,6 +43,15 @@ void AccelerometerCalibrator::beginSixPosition(float motion_threshold) {
 
 void AccelerometerCalibrator::startPosition(AccelPosition pos) {
     if (_status != AccelCalStatus::IN_PROGRESS) return;
+    // NUM_POSITIONS is a valid enumerator whose value equals the length of
+    // every array it sizes, so the one enum constant most likely to be passed
+    // by mistake indexes one past the end of all four. This is reached
+    // straight off a telemetry frame ($CAL,ACCL,...), where the position is
+    // an arbitrary byte and need not be a named enumerator at all, so the
+    // check is against the range rather than against NUM_POSITIONS alone.
+    // Refusing leaves _current_pos at its previous valid value, which is also
+    // what keeps addSample()'s use of it as an index in range.
+    if ((size_t)pos >= (size_t)AccelPosition::NUM_POSITIONS) return;
     size_t idx = (size_t)pos;
     _current_pos = pos;
     _pos_sum[idx] = Vector3f();
@@ -96,6 +105,10 @@ AccelSampleResult AccelerometerCalibrator::addSample(float x, float y, float z) 
 }
 
 bool AccelerometerCalibrator::isPositionDone(AccelPosition pos) const {
+    // Same out-of-range argument as startPosition(), and the same source:
+    // a driving layer asking about a position it read off the wire. A
+    // position that does not exist is not done.
+    if ((size_t)pos >= (size_t)AccelPosition::NUM_POSITIONS) return false;
     return _pos_done[(size_t)pos];
 }
 
