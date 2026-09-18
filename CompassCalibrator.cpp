@@ -100,6 +100,82 @@ void CompassCalibrator::rebin() {
     _sample_count = keep;
 }
 
+// The buffer is full, the sweep is not finished, and this sample may still be
+// worth keeping. Swap it in over one from the fullest bin.
+//
+// The gap of TWO is what makes this safe and what stops it thrashing. With a
+// gap of one -- fullest 5, incoming bin 4 -- the swap merely exchanges which
+// of the two is fuller, so nothing improves and the next sample can swap it
+// straight back. Requiring fullest >= incoming + 2 makes every eviction a
+// strict reduction in the spread of the bin histogram, which also means the
+// process terminates: the histogram cannot keep getting flatter for ever.
+//
+// It also protects _filled_bins. The donor bin holds at least 2, so it never
+// empties and coverage can only rise -- which matters because _filled_bins is
+// half of the readiness test and must not be able to go backwards here.
+//
+// Cost is one pass over the samples to locate a donor, which is O(capacity)
+// atan2f calls and not cheap. It is bounded in total rather than per sample:
+// every eviction flattens the histogram by one step, and there are only
+// NUM_BINS * MAX_PER_BIN slots, so the scan stops firing once the bins
+// equalise. A sample landing in an already-full bin -- the common case once
+// they have -- costs one getBinIndex() and returns, exactly as before.
+//
+// _sum and _accepted_total follow rebin()'s rule and are NOT rolled back for
+// the evicted sample: the centre must stay monotone or it reassigns the bins
+// that chose the eviction, and the two chase each other. See _sum.
+SampleResult CompassCalibrator::evictAndInsert(const Vector3f &s) {
+    // The histogram is rebuilt HERE from the stored samples rather than read
+    // out of _bin_count, and that is not belt-and-braces. _bin_count is only
+    // reconciled with the centroid when rebin() runs, which is deliberately
+    // infrequent (see COMPASS_CAL_REBIN_MOVE_FRACTION), so between rebins its
+    // entries were assigned at a centre that has since moved. Choosing a
+    // donor bin from the stale table and then looking for a sample that bins
+    // there under the CURRENT centre finds nothing: measured, every single
+    // eviction attempt failed that way and the dead end was still a dead end.
+    // One pass, one centre, one set of assignments.
+    const Vector3f c = centroid();
+
+    uint8_t  hist[COMPASS_CAL_NUM_BINS];
+    uint16_t any_index[COMPASS_CAL_NUM_BINS]; // one sample known to be in each bin
+    memset(hist, 0, sizeof(hist));
+    for (uint16_t i = 0; i < _sample_count; i++) {
+        const uint8_t bi = getBinIndex(_samples[i] - c);
+        if (hist[bi] < 255) hist[bi]++;
+        any_index[bi] = i;
+    }
+
+    const uint8_t bin = getBinIndex(s - c);
+    if (hist[bin] >= COMPASS_CAL_MAX_PER_BIN) {
+        noteProgress();
+        return SampleResult::REJECTED_TOO_CLOSE; // this direction is already covered
+    }
+
+    uint8_t fullest = 0;
+    for (uint8_t i = 1; i < COMPASS_CAL_NUM_BINS; i++) {
+        if (hist[i] > hist[fullest]) fullest = i;
+    }
+    if (fullest == bin || hist[fullest] < hist[bin] + 2) {
+        noteProgress();
+        return SampleResult::REJECTED_BUFFER_FULL; // no swap would improve uniformity
+    }
+
+    _samples[any_index[fullest]] = s;
+    _sum = _sum + s;
+    _accepted_total++;
+
+    // Rebuild the persistent table from the samples as they now stand, so
+    // _bin_count and _filled_bins describe the buffer that exists rather than
+    // being patched by hand from a histogram taken a moment ago.
+    rebin();
+    _scatter_ratio = scatterAnisotropy();
+    if (_status == CalStatus::COLLECTING && isReadyToCalibrate()) {
+        _status = CalStatus::READY_TO_FIT;
+    }
+    noteProgress();
+    return SampleResult::ACCEPTED;
+}
+
 // Smallest/largest eigenvalue of the sample scatter (second-moment) matrix
 // taken about the centroid.
 //
@@ -216,9 +292,28 @@ SampleResult CompassCalibrator::addSample(float x, float y, float z) {
         // the sweep is not finished, it just has nowhere left to put samples.
         if (_status == CalStatus::COLLECTING && isReadyToCalibrate()) {
             _status = CalStatus::READY_TO_FIT;
+            noteProgress();
+            return SampleResult::REJECTED_BUFFER_FULL;
         }
-        noteProgress();
-        return SampleResult::REJECTED_BUFFER_FULL;
+        if (_status != CalStatus::COLLECTING || !std::isfinite(x)
+                || !std::isfinite(y) || !std::isfinite(z)) {
+            noteProgress();
+            return SampleResult::REJECTED_BUFFER_FULL;
+        }
+        // Still COLLECTING with a full buffer: the sweep is not finished and
+        // has nowhere to put anything. Without an escape this is a dead end --
+        // an operator who fills the buffer sweeping one-sided and THEN starts
+        // inverting the airframe, which is exactly the corrective action, has
+        // every one of those samples thrown away and can only recover by
+        // restarting the whole procedure.
+        //
+        // So a sample that would make the cloud MORE uniform displaces one
+        // that makes it less so: take the slot from the fullest bin and give
+        // it to this one. That can only ever move a sample from an
+        // over-represented direction to an under-represented one, so it
+        // cannot make a poor sweep pass -- scatter and bin coverage both move
+        // toward the thresholds, never away.
+        return evictAndInsert(Vector3f(x, y, z));
     }
     if (_status != CalStatus::COLLECTING) {
         return SampleResult::REJECTED_NOT_COLLECTING;

@@ -213,6 +213,10 @@ private:
     // samples the new binning makes redundant.
     void rebin();
 
+    // Buffer-full escape: give this sample the slot of one from the fullest
+    // bin, when doing so makes the cloud more uniform. See addSample().
+    SampleResult evictAndInsert(const Vector3f &s);
+
     // Smallest/largest eigenvalue of the sample scatter matrix about the
     // centroid: 1 for a cloud spread evenly over a sphere, 0.25 for one
     // covering a hemisphere, ->0 for a narrow cap. See the note at the
