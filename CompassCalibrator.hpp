@@ -93,7 +93,11 @@ enum class SampleResult : uint8_t {
     ACCEPTED,
     REJECTED_TOO_CLOSE,
     REJECTED_BUFFER_FULL,
-    REJECTED_NOT_COLLECTING
+    REJECTED_NOT_COLLECTING,
+    // APPENDED, so the existing values keep their meaning for anything that
+    // has already reported them. See addSample(): a non-finite reading is
+    // refused because it would poison the running sum irrecoverably.
+    REJECTED_NOT_FINITE
 };
 
 class CompassCalibrator {

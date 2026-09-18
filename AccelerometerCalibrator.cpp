@@ -7,6 +7,11 @@
 
 #include "AccelerometerCalibrator.hpp"
 
+// Named explicitly rather than leaned on through MathTypes.hpp: this file
+// calls fabsf and fmaxf directly, and a header that happens to supply them
+// today is not a contract.
+#include <cmath>
+
 AccelerometerCalibrator::AccelerometerCalibrator() {
     reset();
 }
@@ -78,9 +83,15 @@ AccelSampleResult AccelerometerCalibrator::addSample(float x, float y, float z) 
         const float dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
         if (dist_sq > _sp_motion_threshold_sq) {
             // Discard the whole average rather than folding the outlier in.
-            // The running mean is deliberately NOT reset to the outlier: doing
-            // that would make the next sample look still relative to a value
-            // taken mid-movement.
+            //
+            // _sp_running_mean is left holding the discarded average, but that
+            // value does not survive: _pos_count[idx] is now 0, so the very
+            // next sample takes the count==0 branch above and becomes the new
+            // running mean itself -- a sample just as likely to have been taken
+            // mid-movement. The net behaviour is still correct, because an
+            // average cannot accumulate while the airframe is moving: it
+            // oscillates accept-one / reject-one until the motion stops. What
+            // it is NOT is a guard against seeding from a disturbed sample.
             _pos_sum[idx] = Vector3f();
             _pos_count[idx] = 0;
             r = AccelSampleResult::REJECTED_MOTION;
@@ -130,6 +141,12 @@ void AccelerometerCalibrator::noteProgress() {
 }
 
 bool AccelerometerCalibrator::isStalled() const {
+    // Not stalled once there is nothing left to make progress ON. After the
+    // sixth position completes, progress sits at 100, _best_progress is 100,
+    // and _samples_since_progress climbs with every further sample -- so a
+    // caller that keeps feeding the IMU while waiting to call calibrate()
+    // eventually saw a SUCCESSFUL capture report itself as stalled.
+    if (isReadyToCalibrate()) return false;
     return _samples_since_progress >= ACCEL_CAL_SIXPOS_STALL_LIMIT;
 }
 

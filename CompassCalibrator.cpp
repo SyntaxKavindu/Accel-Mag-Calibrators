@@ -6,6 +6,12 @@
  */
 #include "CompassCalibrator.hpp"
 
+// Named explicitly rather than leaned on through MathTypes.hpp: this file
+// calls memset, sqrtf, fabsf and atan2f directly, and a header that happens
+// to supply them today is not a contract.
+#include <cmath>
+#include <cstring>
+
 CompassCalibrator::CompassCalibrator() {
     reset();
 }
@@ -115,7 +121,27 @@ void CompassCalibrator::rebin() {
 float CompassCalibrator::scatterAnisotropy() const {
     if (_samples == nullptr || _sample_count < 4) return 0.0f;
 
-    const Vector3f c = centroid();
+    // Centred on the mean of the samples ACTUALLY SUMMED BELOW, not on
+    // centroid(). centroid() is the all-time mean over _accepted_total and
+    // includes samples rebin() has since dropped; summing one set of points
+    // about another set's mean adds a rank-1 parallel-axis term, |c_all -
+    // c_surviving|^2 along one direction, which is a property of the dropped
+    // samples rather than of the cloud being measured.
+    //
+    // It biased conservative, so it was never dangerous -- but the figures
+    // this function's threshold is justified by (1.00 for a full sphere, 0.25
+    // for a hemisphere, the analytic r^2/12 over r^2/3) are all derived about
+    // the TRUE mean of the cloud. Correcting the code makes the function
+    // return what those numbers describe; correcting the documentation
+    // instead would leave COMPASS_CAL_MIN_SCATTER_RATIO justified by values
+    // that no longer match anything the code computes.
+    //
+    // This is local to this function. centroid() and the deliberate
+    // no-rollback of _sum are untouched: the binning still needs the monotone
+    // all-time centre, for the convergence reason documented at rebin().
+    Vector3f c;
+    for (uint16_t k = 0; k < _sample_count; k++) c = c + _samples[k];
+    c = c / (float)_sample_count;
 
     // Value-initialised, so every element starts at zero.
     Matrix3f M = Matrix3f();
@@ -166,16 +192,51 @@ uint8_t CompassCalibrator::getBinIndex(const Vector3f &s) {
 }
 
 SampleResult CompassCalibrator::addSample(float x, float y, float z) {
-    // Buffer state is checked before the mode check: once the last slot is
-    // taken addSample() flips the status to READY_TO_FIT, so testing the mode
-    // first would report every later sample as REJECTED_NOT_COLLECTING and the
-    // caller could never tell "buffer full" from "never started".
-    if (_samples == nullptr || _sample_count >= _capacity) {
-        if (_status == CalStatus::COLLECTING) _status = CalStatus::READY_TO_FIT;
+    // A null buffer means begin() was never called (or reset() has run). That
+    // is a different failure from a buffer that filled up, and reporting it as
+    // REJECTED_BUFFER_FULL sent a caller looking for a capacity problem that
+    // does not exist.
+    if (_samples == nullptr) {
+        return SampleResult::REJECTED_NOT_COLLECTING;
+    }
+    // The genuinely-full case still precedes the mode check, and that ordering
+    // is deliberate: once the last slot is taken the status may move to
+    // READY_TO_FIT, so testing the mode first would report every later sample
+    // as REJECTED_NOT_COLLECTING and the caller could never tell "buffer full"
+    // from "never started".
+    if (_sample_count >= _capacity) {
+        // Only claim readiness when it is actually true. Coverage is safe here
+        // -- MAX_PER_BIN 5 means a full 300-slot buffer implies >= 60 filled
+        // bins, above MIN_BINS 45 -- but SCATTER is not: centroid-relative
+        // binning lets a one-sided sweep satisfy the bin count while sitting
+        // at ~0.38 against a 0.5 threshold. Flipping to READY_TO_FIT anyway
+        // left the class saying READY_TO_FIT while isReadyToCalibrate()
+        // returned false, progress frozen and calibrate() failing -- a state
+        // no caller can act on. Staying in COLLECTING is the honest report:
+        // the sweep is not finished, it just has nowhere left to put samples.
+        if (_status == CalStatus::COLLECTING && isReadyToCalibrate()) {
+            _status = CalStatus::READY_TO_FIT;
+        }
+        noteProgress();
         return SampleResult::REJECTED_BUFFER_FULL;
     }
     if (_status != CalStatus::COLLECTING) {
         return SampleResult::REJECTED_NOT_COLLECTING;
+    }
+
+    // A non-finite reading is refused outright. _sum is deliberately never
+    // rolled back (see the note on it), so a single NaN folded into it makes
+    // centroid() NaN for the rest of the run: every subsequent bin index
+    // collapses to 0, scatterAnisotropy() returns 0, and no quantity of good
+    // samples afterwards can recover it. Measured: 200 good samples reaching
+    // scatter 0.97, then one NaN, then 2000 more good samples still stuck at
+    // scatter 0.00 and calibrate() returning FAILED_POOR_COVERAGE. The only
+    // way out was begin() again, which is not something a driving layer knows
+    // to do. One check at the boundary is far cheaper than making the running
+    // sum recoverable.
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        noteProgress();
+        return SampleResult::REJECTED_NOT_FINITE;
     }
 
     Vector3f s(x, y, z);
@@ -239,7 +300,12 @@ SampleResult CompassCalibrator::addSample(float x, float y, float z) {
     // samples are capped by the buffer, so this is bounded work.
     _scatter_ratio = scatterAnisotropy();
 
-    if (_sample_count >= _capacity) {
+    // Same rule as the buffer-full early return above: the buffer being full
+    // is not the same thing as the sweep being finished. This is the site
+    // that actually fires on a one-sided sweep -- it is the ACCEPT that takes
+    // the last slot, not the rejections that follow it, which first flipped
+    // the status.
+    if (_sample_count >= _capacity && isReadyToCalibrate()) {
         _status = CalStatus::READY_TO_FIT;
     }
 
@@ -367,7 +433,25 @@ bool CompassCalibrator::invert3x3(const Matrix3f &in, Matrix3f &out) {
     const float C = (d * h - e * g);
 
     const float det = a * A + b * B + c * C;
-    if (fabsf(det) < 1e-9f) return false;
+
+    // Singularity judged RELATIVE to the size of the matrix, matching
+    // solve9x9(), eigenSymmetric3x3() and ESEKF::matrixInverse3x3(), which is
+    // the reference implementation for this test. An absolute 1e-9 is only
+    // meaningful for entries of order 1: this matrix is M/K from the ellipsoid
+    // fit, whose scale follows the sensor's units, so the old threshold was
+    // far below float precision for a LIS3MDL reporting raw LSB (entries ~1e3,
+    // det ~1e9) and far above it for one reporting Gauss (entries ~1, det ~1).
+    // The determinant of a 3x3 scales as the CUBE of its entries, so the
+    // comparison is against scale^3.
+    float scale = 0.0f;
+    for (int r = 0; r < 3; r++) {
+        for (int cc = 0; cc < 3; cc++) {
+            const float v = fabsf(in.m[r][cc]);
+            if (v > scale) scale = v;
+        }
+    }
+    if (scale <= 0.0f) return false;
+    if (fabsf(det) < 1e-9f * scale * scale * scale) return false;
 
     const float inv_det = 1.0f / det;
 
@@ -386,8 +470,15 @@ bool CompassCalibrator::invert3x3(const Matrix3f &in, Matrix3f &out) {
     return true;
 }
 
-static inline void jacobiRotate(Matrix3f &m, Matrix3f *v, int p, int q) {
-    if (fabsf(m.m[p][q]) < 1e-12f) return;
+// `scale` is the same trace-based size measure eigenSymmetric3x3() derives its
+// convergence threshold from, passed in rather than recomputed per rotation.
+static inline void jacobiRotate(Matrix3f &m, Matrix3f *v, int p, int q, float scale) {
+    // Relative, for the same reason as the convergence test in the caller: an
+    // absolute 1e-12 means "already diagonal" for a scatter matrix in Gauss^2
+    // (entries ~0.25) and "never diagonal" for one in raw LSB^2 (entries ~1e5),
+    // so which off-diagonals got rotated away depended on the caller's units
+    // rather than on the matrix.
+    if (fabsf(m.m[p][q]) < 1e-12f * scale) return;
 
     float theta = (m.m[q][q] - m.m[p][p]) / (2.0f * m.m[p][q]);
     float t = (theta >= 0.0f) ? 1.0f / (theta + sqrtf(1.0f + theta * theta))
@@ -431,9 +522,9 @@ void CompassCalibrator::eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f 
         float off = fabsf(m.m[0][1]) + fabsf(m.m[0][2]) + fabsf(m.m[1][2]);
         if (off < off_tol) break;
 
-        jacobiRotate(m, eigvec, 0, 1);
-        jacobiRotate(m, eigvec, 0, 2);
-        jacobiRotate(m, eigvec, 1, 2);
+        jacobiRotate(m, eigvec, 0, 1, scale);
+        jacobiRotate(m, eigvec, 0, 2, scale);
+        jacobiRotate(m, eigvec, 1, 2, scale);
     }
     eigval[0] = m.m[0][0];
     eigval[1] = m.m[1][1];
