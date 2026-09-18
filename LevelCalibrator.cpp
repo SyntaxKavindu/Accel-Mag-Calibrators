@@ -7,6 +7,11 @@
 
 #include "LevelCalibrator.hpp"
 
+// Named explicitly rather than leaned on through MathTypes.hpp: this file
+// calls cosf, sinf, acosf and fabsf directly, and a header that happens to
+// supply them today is not a contract.
+#include <cmath>
+
 LevelCalibrator::LevelCalibrator() {
     reset();
 }

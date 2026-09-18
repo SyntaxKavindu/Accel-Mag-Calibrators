@@ -85,11 +85,33 @@ public:
     LevelCalibrator();
     void reset();
 
+    // NEITHER of the first two arguments has a default, deliberately. Both
+    // used to, and both defaults were wrong for the pipeline this class
+    // documents -- silently, by returning a plausible failure code rather
+    // than a wrong number. Requiring the caller to state them is the only
+    // form that cannot be got wrong by not thinking about it; a corrected
+    // default would just move the trap rather than remove it.
+    //
     // expected_level_reading: the direction the accelerometer reads when the
     //   airframe is level and upright, as a unit vector in body axes. It reads
-    //   specific force, so with +Z up that is (0,0,+1) -- the same convention
-    //   AccelPosition::Z_UP assumes. Pass (0,0,-1) for a +Z-down frame.
-    // nominal_g: magnitude of 1 g in sample units (9.80665 for m/s^2).
+    //   SPECIFIC FORCE, i.e. -g in body axes, so the value follows the body
+    //   frame's sign convention and not "up".
+    //     FRD (X forward, Y right, Z DOWN) -- what this project's ESEKF and
+    //     every NED consumer use -- reads {0,0,-1}. ESEKF.cpp documents the
+    //     static reading as [g*sin(pitch), -g*sin(roll)*cos(pitch),
+    //     -g*cos(roll)*cos(pitch)], which at level is {0,0,-g}.
+    //     A +Z-up frame reads {0,0,+1}.
+    //   Getting the sign wrong is not a small error: it makes `measured` and
+    //   `_target` antiparallel, which rotationBetween() refuses outright, so
+    //   it surfaces as FAILED_EXCESSIVE_TILT rather than a bad rotation.
+    // nominal_g: magnitude of 1 g IN THE UNITS OF THE SAMPLES BEING FED.
+    //   9.80665 for raw m/s^2 readings. But the documented pipeline feeds
+    //   AccelerometerCalibrator::correct(), whose output is (raw-bias)/scale
+    //   and therefore UNIT-NORMALISED -- magnitude ~1.0, as that class's own
+    //   header states -- so that path needs 1.0, not 9.80665. With 9.80665
+    //   against unit samples calibrate() computes |1.0 - 9.80665| = 8.807
+    //   against an allowance of 0.15 * 9.80665 = 1.471 and returns
+    //   FAILED_BAD_MAGNITUDE every single time.
     // yaw_offset_deg: mounting rotation about the vertical axis. Gravity
     //   cannot supply this -- turning about gravity does not change what the
     //   accelerometer reads -- so it has to come from outside: the nominal
@@ -99,8 +121,8 @@ public:
     //   (measured: 1 deg of mounting rotation leaves 0.50 deg of yaw and
     //   0.39 deg of roll/pitch error across a +-34 deg envelope, against 1.10
     //   deg uncorrected). Supplying it removes the rest.
-    void begin(const Vector3f &expected_level_reading = Vector3f(0.0f, 0.0f, 1.0f),
-               float nominal_g = LEVEL_CAL_STANDARD_GRAVITY,
+    void begin(const Vector3f &expected_level_reading,
+               float nominal_g,
                float motion_threshold = LEVEL_CAL_MOTION_THRESHOLD,
                float yaw_offset_deg = 0.0f);
 
